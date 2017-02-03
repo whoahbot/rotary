@@ -1,10 +1,11 @@
 (ns rotary.client
   "Amazon DynamoDB client functions."
-  (:use [clojure.algo.generic.functor :only (fmap)]
-        [clojure.core.incubator :only (-?>>)])
+  (:use [clojure.algo.generic.functor :only (fmap)])
   (:require [clojure.string :as str])
-  (:import com.amazonaws.auth.BasicAWSCredentials
-           com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient
+  (:import [com.amazonaws.auth AWSCredentialsProvider
+            BasicAWSCredentials DefaultAWSCredentialsProviderChain]
+           [com.amazonaws.services.dynamodbv2 AmazonDynamoDBClient]
+           [com.amazonaws ClientConfiguration]
            [com.amazonaws.services.dynamodbv2.model
             AttributeValue
             AttributeDefinition
@@ -38,7 +39,9 @@
 (defn- db-client*
   "Get a AmazonDynamoDBClient instance for the supplied credentials."
   [cred]
-  (let [aws-creds (BasicAWSCredentials. (:access-key cred) (:secret-key cred))
+  (let [aws-creds (if (every? cred [:access-key :secret-key])
+                    (BasicAWSCredentials. (:access-key cred) (:secret-key cred))
+                    (DefaultAWSCredentialsProviderChain.))
         client (AmazonDynamoDBClient. aws-creds)]
     (when-let [endpoint (:endpoint cred)]
       (.setEndpoint client endpoint))
@@ -56,9 +59,9 @@
   "Get the value of an AttributeValue object."
   [attr-value]
   (or (.getS attr-value)
-      (-?>> (.getN attr-value) to-long)
-      (-?>> (.getNS attr-value) (map to-long) (into #{}))
-      (-?>> (.getSS attr-value) (into #{}))))
+      (some->> (.getN attr-value) to-long)
+      (some->> (.getNS attr-value) (map to-long) (into #{}))
+      (some->> (.getSS attr-value) (into #{}))))
 
 (defn- key-schema-element
   "Create a KeySchemaElement object."
@@ -146,18 +149,20 @@
     :included-attrs - a vector of attribute names when :projection is :include (optional)"
   [cred {:keys [name hash-key range-key throughput indexes]}]
   (.createTable
-    (db-client cred)
-    (let [defined-attrs (->> (conj [] hash-key range-key)
-                             (concat (map #(:range-key %) indexes))
-                             (remove nil?))]
-      (doto (CreateTableRequest.)
-        (.setTableName (str name))
-        (.setKeySchema (key-schema hash-key range-key))
-        (.setAttributeDefinitions (attribute-definitions defined-attrs))
-        (.setProvisionedThroughput
-          (provisioned-throughput throughput))
-        (.setLocalSecondaryIndexes
-          (local-indexes hash-key indexes))))))
+   (db-client cred)
+   (let [defined-attrs (->> (conj [] hash-key range-key)
+                            (concat (map #(:range-key %) indexes))
+                            (remove nil?))
+         table-request (doto (CreateTableRequest.)
+                         (.setTableName (str name))
+                         (.setKeySchema (key-schema hash-key range-key))
+                         (.setAttributeDefinitions (attribute-definitions defined-attrs))
+                         (.setProvisionedThroughput
+                          (provisioned-throughput throughput)))]
+     (when (not (empty? indexes))
+       (.setLocalSecondaryIndexes table-request
+                                  (local-indexes hash-key indexes)))
+     table-request)))
 
 (defn update-table
   "Update a table in DynamoDB with the given name. Only the throughput may be
